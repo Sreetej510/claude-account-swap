@@ -4,6 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const readline = require('readline');
 
 const CLAUDE_DIR = path.join(process.env.USERPROFILE || process.env.HOME, '.claude');
@@ -14,7 +15,7 @@ const SWAP_FILE = path.join(CLAUDE_DIR, 'swap-accounts.json');
 
 function readJson(filePath) {
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return JSON.parse(fs.readFileSync(filePath, 'utf8').replace(/^﻿/, ''));
   } catch {
     return null;
   }
@@ -34,7 +35,7 @@ const c = {
   bold:   '\x1b[1m',
   dim:    '\x1b[2m',
   green:  '\x1b[32m',
-  yellow: '\x1b[33m',
+  yellow: '\x1b[97m',
   red:    '\x1b[31m',
 };
 
@@ -86,6 +87,150 @@ function selectFromList(items, labelFn, currentName) {
 
     process.stdin.on('keypress', onKey);
   });
+}
+
+// ── usage fetch ───────────────────────────────────────────────────────────────
+
+const cp = require('child_process');
+
+function httpsGet(url, token) {
+  // On Windows, Node's https is often blocked by Defender/Firewall for scripts
+  // running from AppData. Use curl (built into Windows 10+) which is trusted.
+  if (process.platform === 'win32') {
+    return new Promise((resolve) => {
+      const result = cp.spawnSync('curl', [
+        '-s', '--max-time', '10',
+        '-H', `Authorization: Bearer ${token}`,
+        '-H', 'Accept: application/json',
+        '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        '-w', '\n%{http_code}',
+        url
+      ], { encoding: 'utf8', timeout: 15000 });
+
+      if (result.error || result.status !== 0) { resolve(null); return; }
+
+      const out    = result.stdout.trim();
+      const lines  = out.split('\n');
+      const status = parseInt(lines.at(-1), 10);
+      const body   = lines.slice(0, -1).join('\n');
+
+      try { resolve({ status, data: JSON.parse(body) }); }
+      catch { resolve({ status, data: null }); }
+    });
+  }
+
+  // macOS / Linux: use Node's built-in https
+  return new Promise((resolve) => {
+    const u = new URL(url);
+    const req = https.request({
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+      timeout: 12000,
+    }, (res) => {
+      let body = '';
+      res.on('data', d => body += d);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, data: JSON.parse(body) }); }
+        catch { resolve({ status: res.statusCode, data: null }); }
+      });
+    });
+    req.on('error', e => resolve({ status: -1, code: e.code }));
+    req.on('timeout', () => { req.destroy(); resolve({ status: -1, code: 'TIMEOUT' }); });
+    req.end();
+  });
+}
+
+const USAGE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Returns a human-readable usage string, or null if unavailable.
+// Response shape: { five_hour: { utilization: 8.0, resets_at: "..." }, seven_day: { ... } }
+// utilization is 0–100 (percent used).
+async function fetchUsage(credentials, cached) {
+  // Use cached value if it's fresh enough
+  if (cached?.text && cached?.at && (Date.now() - cached.at) < USAGE_CACHE_TTL) {
+    return cached.text;
+  }
+
+  const token = credentials?.claudeAiOauth?.accessToken;
+  if (!token) return null;
+
+  try {
+    const res = await httpsGet('https://api.anthropic.com/api/oauth/usage', token);
+    if (!res || res.status === -1) return `(${res?.code ?? 'unreachable'})`;
+    if (res.status === 401) return '(token expired — swap to refresh)';
+    if (res.status === 429) return cached?.text ?? '(rate limited)';
+    if (res.status !== 200 || !res.data) return `(HTTP ${res.status})`;
+
+    const d = res.data;
+
+    // Enterprise: find the active allocation window with the smallest limit
+    // (personal/team buckets like cinder_cove have smaller limits than org-wide)
+    const NAMED_WINDOWS = ['cinder_cove', 'amber_ladder', 'tangelo', 'iguana_necktie',
+                           'omelette_promotional', 'seven_day_cowork'];
+    const activeWindows = NAMED_WINDOWS
+      .map(k => d[k])
+      .filter(w => w && w.limit_dollars != null && w.used_dollars != null)
+      .sort((a, b) => a.limit_dollars - b.limit_dollars); // smallest limit first
+
+    if (activeWindows.length > 0) {
+      const w    = activeWindows[0];
+      const pct  = Math.round(w.utilization ?? 0);
+      const filled = Math.round(pct / 20);
+      const bar  = '█'.repeat(filled) + '░'.repeat(5 - filled);
+      const used = w.used_dollars.toFixed(0);
+      const lim  = w.limit_dollars.toFixed(0);
+      let resetStr = '';
+      if (w.resets_at) {
+        const rd = new Date(w.resets_at);
+        resetStr = `  ↺ ${rd.toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
+      }
+      return `${bar}${pct}% used  $${used}/$${lim}${resetStr}`;
+    }
+
+    // Fallback: org-wide monthly spend
+    const eu = d.extra_usage;
+    if (eu?.is_enabled && eu?.used_credits != null) {
+      const currency = eu.currency ?? 'USD';
+      const used     = Math.round(eu.used_credits).toLocaleString();
+      const pct      = Math.round(eu.utilization ?? 0);
+      const filled   = Math.round(pct / 20);
+      const bar      = '█'.repeat(filled) + '░'.repeat(5 - filled);
+      if (eu.monthly_limit) {
+        const limit = Math.round(eu.monthly_limit).toLocaleString();
+        return `${bar}${pct}% used  ${currency} ${used}/${limit}`;
+      }
+      return `${bar}${pct}% used  ${currency} ${used}`;
+    }
+
+    // Pro: utilization windows (percent used, 0–100)
+    function fmtWindow(obj, label) {
+      if (!obj || obj.utilization == null) return null;
+      const used   = Math.round(obj.utilization);
+      const filled = Math.round(used / 20);
+      const bar    = '█'.repeat(filled) + '░'.repeat(5 - filled);
+      let resetStr = '';
+      if (obj.resets_at) {
+        const rd = new Date(obj.resets_at);
+        resetStr = `  ↺ ${rd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+      }
+      return `${label}:${bar}${used}% used${resetStr}`;
+    }
+
+    const parts = [
+      fmtWindow(d.five_hour, '5h'),
+      fmtWindow(d.seven_day, '7d'),
+    ].filter(Boolean);
+
+    return parts.length ? parts.join('  ') : null;
+  } catch {
+    return null;
+  }
 }
 
 // ── commands ──────────────────────────────────────────────────────────────────
@@ -166,7 +311,7 @@ async function cmdAdd(name) {
   console.log(`${c.dim}Saved to ${SWAP_FILE}${c.reset}`);
 }
 
-function cmdList() {
+async function cmdList() {
   const swapData = readSwapData();
 
   if (swapData.accounts.length === 0) {
@@ -174,13 +319,47 @@ function cmdList() {
     return;
   }
 
+  // Keep active account's stored token in sync with the live credentials.json
+  // (Claude Code refreshes tokens silently, so the stored copy goes stale fast)
+  const liveCreds = readJson(CREDENTIALS_FILE);
+  if (liveCreds && swapData.currentAccount) {
+    const idx = swapData.accounts.findIndex(a => a.name === swapData.currentAccount);
+    if (idx >= 0) {
+      swapData.accounts[idx].credentials = liveCreds;
+      writeJson(SWAP_FILE, swapData);
+    }
+  }
+
   console.log(`${c.bold}Saved accounts:${c.reset}\n`);
-  swapData.accounts.forEach(a => {
-    const active = a.name === swapData.currentAccount;
-    const sub    = a.credentials?.claudeAiOauth?.subscriptionType || 'unknown';
-    const marker = active ? `${c.green}●${c.reset}` : ' ';
-    const tag    = active ? `  ${c.green}(active)${c.reset}` : '';
-    console.log(`  ${marker} ${c.bold}${a.name}${c.reset}  ${c.dim}${sub}${c.reset}${tag}`);
+  process.stdout.write(`${c.dim}Fetching usage…${c.reset}\r`);
+
+  // Fetch usage for all accounts in parallel, passing any cached value
+  const usages = await Promise.all(
+    swapData.accounts.map(a => fetchUsage(a.credentials, a.usageCache))
+  );
+
+  // Persist fresh values back (only real usage data, not error strings)
+  const isErrorMsg = t => !t || t.startsWith('(');
+  let cacheDirty = false;
+  usages.forEach((text, i) => {
+    const a = swapData.accounts[i];
+    if (!isErrorMsg(text) && text !== a.usageCache?.text) {
+      a.usageCache = { text, at: Date.now() };
+      cacheDirty = true;
+    }
+  });
+  if (cacheDirty) writeJson(SWAP_FILE, swapData);
+
+  process.stdout.write('\r\x1b[K'); // clear "Fetching…" line
+
+  swapData.accounts.forEach((a, i) => {
+    const active  = a.name === swapData.currentAccount;
+    const sub     = a.credentials?.claudeAiOauth?.subscriptionType || 'unknown';
+    const usage   = usages[i];
+    const marker  = active ? `${c.green}●${c.reset}` : ' ';
+    const activeTag = active ? `  ${c.green}(active)${c.reset}` : '';
+    const usageTag  = usage  ? `  ${c.yellow}${usage}${c.reset}` : '';
+    console.log(`  ${marker} ${c.bold}${a.name}${c.reset}  ${c.dim}${sub}${c.reset}${usageTag}${activeTag}`);
   });
   console.log();
 }
@@ -234,7 +413,7 @@ async function main() {
 
   switch (cmd) {
     case 'add':    await cmdAdd(arg); break;
-    case 'list':   cmdList(); break;
+    case 'list':   await cmdList(); break;
     case 'remove': cmdRemove(arg); break;
     case 'help':
     case '--help':
