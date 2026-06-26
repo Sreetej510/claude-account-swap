@@ -1,14 +1,12 @@
 # claude-account-swap
 
-Switch between multiple Claude accounts from the terminal. Swaps the credentials file and spoofs your MAC address so each account looks like a distinct device.
+Switch between multiple Claude accounts from the terminal by swapping the credentials file.
 
 ## Install
 
 ```sh
 npm install -g claude-account-swap
 ```
-
-> MAC spoofing requires the terminal to be run as **Administrator** (Windows) or with **sudo** (macOS/Linux).
 
 ## Setup
 
@@ -24,29 +22,21 @@ Log in to your second account, then save it:
 cas add "Work"
 ```
 
-Each account gets a unique MAC address automatically. The first account keeps your real MAC; additional accounts get randomly generated VM-vendor MACs so they appear as different devices.
-
 ## Usage
 
 ```sh
 cas
 ```
 
-Opens an interactive picker. Use arrow keys to select an account, Enter to switch. The tool:
-
-1. Writes the selected account's credentials to `~/.claude/.credentials.json`
-2. Spoofs your network adapter's MAC to the address stored for that account
-3. Saves your current credentials back before switching
-
-Restart Claude Code after swapping.
+Opens an interactive picker. Use arrow keys to select an account, press Enter to switch. Restarts Claude Code to apply the change.
 
 ## Commands
 
 | Command | Description |
 |---|---|
 | `cas` | Interactive account switcher |
-| `cas add <name>` | Save current credentials + MAC as a named account |
-| `cas list` | List all saved accounts with their MACs |
+| `cas add <name>` | Save current credentials as a named account |
+| `cas list` | List all saved accounts |
 | `cas remove <name>` | Delete a saved account |
 | `cas help` | Show help |
 
@@ -57,13 +47,7 @@ All commands also work with `claude-account-swap` as the prefix.
 | Path | Purpose |
 |---|---|
 | `~/.claude/.credentials.json` | Active Claude credentials (managed by Claude Code) |
-| `~/.claude/swap-accounts.json` | All saved accounts with credentials and MACs |
-
-## Notes
-
-- **Admin required for MAC spoofing.** Credentials still swap without it — only the MAC step is skipped.
-- The network adapter disconnects for ~5 seconds when the MAC changes.
-- Accounts are stored locally; nothing is sent anywhere.
+| `~/.claude/swap-accounts.json` | All saved accounts |
 
 ## License
 

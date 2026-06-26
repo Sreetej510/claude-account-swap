@@ -5,7 +5,6 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const macSpoof = require('./mac-spoof');
 
 const CLAUDE_DIR = path.join(process.env.USERPROFILE || process.env.HOME, '.claude');
 const CREDENTIALS_FILE = path.join(CLAUDE_DIR, '.credentials.json');
@@ -30,26 +29,14 @@ function readSwapData() {
   return readJson(SWAP_FILE) || { currentAccount: null, accounts: [] };
 }
 
-function readCurrentCredentials() {
-  return readJson(CREDENTIALS_FILE);
-}
-
 const c = {
   reset:  '\x1b[0m',
   bold:   '\x1b[1m',
   dim:    '\x1b[2m',
   green:  '\x1b[32m',
   yellow: '\x1b[33m',
-  cyan:   '\x1b[36m',
   red:    '\x1b[31m',
 };
-
-function shortMac(mac) {
-  // Show last 3 octets for brevity: XX:XX:XX
-  if (!mac) return '';
-  const parts = mac.split(':');
-  return parts.length === 6 ? parts.slice(3).join(':') : mac;
-}
 
 // ── interactive list selector ─────────────────────────────────────────────────
 
@@ -73,11 +60,7 @@ function selectFromList(items, labelFn, currentName) {
       lines.push('');
       items.forEach((item, i) => {
         const label = labelFn(item);
-        if (i === selected) {
-          lines.push(`${c.green}❯ ${c.bold}${label}${c.reset}`);
-        } else {
-          lines.push(`  ${label}`);
-        }
+        lines.push(i === selected ? `${c.green}❯ ${c.bold}${label}${c.reset}` : `  ${label}`);
       });
       process.stdout.write(lines.join('\n') + '\n');
       linesDrawn = lines.length;
@@ -90,10 +73,10 @@ function selectFromList(items, labelFn, currentName) {
     function onKey(str, key) {
       if (!key) return;
       if (key.ctrl && key.name === 'c') { cleanup(); process.stdout.write('\n'); process.exit(0); }
-      if (key.name === 'up')     { selected = (selected - 1 + items.length) % items.length; render(); }
-      else if (key.name === 'down')   { selected = (selected + 1) % items.length; render(); }
-      else if (key.name === 'return') { cleanup(); process.stdout.write('\n'); resolve(items[selected]); }
-      else if (key.name === 'escape') { cleanup(); process.stdout.write('\n'); resolve(null); }
+      if (key.name === 'up')           { selected = (selected - 1 + items.length) % items.length; render(); }
+      else if (key.name === 'down')    { selected = (selected + 1) % items.length; render(); }
+      else if (key.name === 'return')  { cleanup(); process.stdout.write('\n'); resolve(items[selected]); }
+      else if (key.name === 'escape')  { cleanup(); process.stdout.write('\n'); resolve(null); }
     }
 
     function cleanup() {
@@ -108,7 +91,7 @@ function selectFromList(items, labelFn, currentName) {
 // ── commands ──────────────────────────────────────────────────────────────────
 
 async function cmdSwap() {
-  if (!readCurrentCredentials()) {
+  if (!readJson(CREDENTIALS_FILE)) {
     console.error(`${c.red}Error:${c.reset} No credentials found at ${CREDENTIALS_FILE}`);
     process.exit(1);
   }
@@ -133,87 +116,37 @@ async function cmdSwap() {
     available,
     (a) => {
       const sub = a.credentials?.claudeAiOauth?.subscriptionType;
-      const macTag = a.mac ? `${c.cyan}…${shortMac(a.mac)}${c.reset}` : '';
-      const subTag = sub ? `${c.dim}${sub}${c.reset}` : '';
-      const tags = [subTag, macTag].filter(Boolean).join('  ');
-      return tags ? `${a.name}  ${tags}` : a.name;
+      return sub ? `${a.name}  ${c.dim}${sub}${c.reset}` : a.name;
     },
     swapData.currentAccount
   );
 
   if (!selected) { console.log('Cancelled.'); return; }
 
-  // Re-read credentials.json now — tokens may have refreshed since the picker opened
-  const currentCreds = readCurrentCredentials();
+  // Re-read now — tokens may have refreshed while the picker was open
+  const currentCreds = readJson(CREDENTIALS_FILE);
 
-  // Persist current credentials + current MAC back under its name
+  // Save current (refreshed) credentials back before switching
   if (swapData.currentAccount) {
     const idx = swapData.accounts.findIndex(a => a.name === swapData.currentAccount);
-    if (idx >= 0) {
-      swapData.accounts[idx].credentials = currentCreds;
-      // Update stored MAC to whatever is currently active
-      try {
-        const iface = macSpoof.findPrimaryInterface();
-        if (iface && iface.currentAddress) {
-          swapData.accounts[idx].mac = macSpoof.normalizeMac(iface.currentAddress);
-        }
-      } catch { /* non-fatal */ }
-    }
+    if (idx >= 0) swapData.accounts[idx].credentials = currentCreds;
   }
 
   swapData.currentAccount = selected.name;
   writeJson(SWAP_FILE, swapData);
   writeJson(CREDENTIALS_FILE, selected.credentials);
 
-  console.log(`${c.green}✓${c.reset} Credentials → ${c.bold}${selected.name}${c.reset}`);
-
-  // Spoof MAC
-  if (selected.mac) {
-    process.stdout.write(`  MAC spoof ${c.dim}(${selected.mac})${c.reset} … `);
-    try {
-      const result = await macSpoof.applyMac(selected.mac);
-      if (result.skipped) {
-        console.log(`${c.dim}already set${c.reset}`);
-      } else if (result.warning) {
-        console.log(`${c.yellow}⚠${c.reset}  ${result.warning}`);
-      } else {
-        console.log(`${c.green}done${c.reset}  ${c.dim}${result.oldMac} → ${result.newMac}${c.reset}`);
-      }
-    } catch (err) {
-      console.log(`${c.yellow}⚠${c.reset}  ${err.message}`);
-    }
-  } else {
-    console.log(`  ${c.dim}No MAC stored for this account — run 'claude-swap add' again to capture one${c.reset}`);
-  }
-
-  console.log(`\n${c.dim}Restart Claude Code for the change to take effect.${c.reset}`);
+  console.log(`${c.green}✓${c.reset} Switched to ${c.bold}${selected.name}${c.reset}`);
+  console.log(`${c.dim}Restart Claude Code for the change to take effect.${c.reset}`);
 }
 
 async function cmdAdd(name) {
-  if (!name) {
-    console.error(`Usage: claude-swap add <name>`);
-    process.exit(1);
-  }
+  if (!name) { console.error(`Usage: cas add <name>`); process.exit(1); }
 
-  const currentCreds = readCurrentCredentials();
+  const currentCreds = readJson(CREDENTIALS_FILE);
   if (!currentCreds) {
     console.error(`${c.red}Error:${c.reset} No credentials found at ${CREDENTIALS_FILE}`);
     process.exit(1);
-  }
-
-  // Capture current MAC, assign a unique one per account
-  let mac = null;
-  try {
-    const iface = macSpoof.findPrimaryInterface();
-    const currentMac = iface ? iface.currentAddress : null;
-    const swapData = readSwapData();
-    const usedMacs = swapData.accounts
-      .filter(a => a.name !== name) // exclude the account being updated
-      .map(a => a.mac)
-      .filter(Boolean);
-    mac = macSpoof.assignUniqueMac(usedMacs, currentMac);
-  } catch (err) {
-    console.log(`${c.yellow}⚠${c.reset}  Could not read MAC address: ${err.message}`);
   }
 
   const swapData = readSwapData();
@@ -221,20 +154,15 @@ async function cmdAdd(name) {
 
   if (existingIdx >= 0) {
     swapData.accounts[existingIdx].credentials = currentCreds;
-    if (mac) swapData.accounts[existingIdx].mac = mac;
     console.log(`${c.green}✓${c.reset} Updated account ${c.bold}${name}${c.reset}`);
   } else {
-    swapData.accounts.push({ name, credentials: currentCreds, mac });
+    swapData.accounts.push({ name, credentials: currentCreds });
     console.log(`${c.green}✓${c.reset} Added account ${c.bold}${name}${c.reset}`);
   }
 
   if (!swapData.currentAccount) swapData.currentAccount = name;
 
   writeJson(SWAP_FILE, swapData);
-
-  if (mac) {
-    console.log(`  MAC: ${c.cyan}${mac}${c.reset}`);
-  }
   console.log(`${c.dim}Saved to ${SWAP_FILE}${c.reset}`);
 }
 
@@ -249,29 +177,21 @@ function cmdList() {
   console.log(`${c.bold}Saved accounts:${c.reset}\n`);
   swapData.accounts.forEach(a => {
     const active = a.name === swapData.currentAccount;
-    const sub = a.credentials?.claudeAiOauth?.subscriptionType || 'unknown';
+    const sub    = a.credentials?.claudeAiOauth?.subscriptionType || 'unknown';
     const marker = active ? `${c.green}●${c.reset}` : ' ';
-    const activeTag = active ? `  ${c.green}(active)${c.reset}` : '';
-    const macTag = a.mac ? `  ${c.cyan}${a.mac}${c.reset}` : '';
-    console.log(`  ${marker} ${c.bold}${a.name}${c.reset}  ${c.dim}${sub}${c.reset}${macTag}${activeTag}`);
+    const tag    = active ? `  ${c.green}(active)${c.reset}` : '';
+    console.log(`  ${marker} ${c.bold}${a.name}${c.reset}  ${c.dim}${sub}${c.reset}${tag}`);
   });
   console.log();
 }
 
 function cmdRemove(name) {
-  if (!name) {
-    console.error(`Usage: claude-swap remove <name>`);
-    process.exit(1);
-  }
+  if (!name) { console.error(`Usage: cas remove <name>`); process.exit(1); }
 
   const swapData = readSwapData();
   const idx = swapData.accounts.findIndex(a => a.name === name);
 
-  if (idx < 0) {
-    console.error(`${c.red}Error:${c.reset} Account not found: ${name}`);
-    process.exit(1);
-  }
-
+  if (idx < 0) { console.error(`${c.red}Error:${c.reset} Account not found: ${name}`); process.exit(1); }
   if (swapData.currentAccount === name) {
     console.error(`${c.red}Error:${c.reset} Cannot remove the active account. Switch to another first.`);
     process.exit(1);
@@ -284,26 +204,21 @@ function cmdRemove(name) {
 
 function showHelp() {
   console.log(`
-${c.bold}claude-account-swap${c.reset} — Switch between Claude accounts (credentials + MAC address)
+${c.bold}claude-account-swap${c.reset} — Switch between Claude accounts
 
 ${c.bold}Usage:${c.reset}
-  cas                             Interactive account switcher
-  cas add <name>                  Save current credentials + MAC as a named account
-  cas list                        List all saved accounts
-  cas remove <name>               Remove a saved account
-  cas help                        Show this help
+  cas                     Interactive account switcher
+  cas add <name>          Save current credentials as a named account
+  cas list                List all saved accounts
+  cas remove <name>       Remove a saved account
+  cas help                Show this help
 
 ${c.bold}Typical workflow:${c.reset}
   1. Log in to account A in Claude Code
      ${c.dim}cas add "Work"${c.reset}
   2. Log in to account B in Claude Code
      ${c.dim}cas add "Personal"${c.reset}
-  3. Run ${c.bold}cas${c.reset} any time — switches credentials AND spoofs MAC
-
-${c.bold}Notes:${c.reset}
-  • MAC spoofing requires Administrator / root privileges
-  • The network adapter will reconnect briefly (~5s) during a MAC change
-  • Each account gets a unique MAC (auto-generated if needed)
+  3. Run ${c.bold}cas${c.reset} any time to switch between them
 
 ${c.bold}Files:${c.reset}
   Active credentials : ${CREDENTIALS_FILE}

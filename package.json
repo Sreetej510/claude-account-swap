@@ -9,14 +9,10 @@
   },
   "files": [
     "index.js",
-    "mac-spoof.js",
     "README.md"
   ],
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "spoof": "^2.0.4"
   },
   "keywords": [
     "claude",
