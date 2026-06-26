@@ -1,0 +1,29 @@
+{
+  "name": "claude-account-swap",
+  "version": "1.0.1",
+  "description": "Switch between Claude accounts — swaps credentials and spoofs MAC address",
+  "main": "index.js",
+  "bin": {
+    "claude-account-swap": "./index.js",
+    "cas": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "mac-spoof.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "spoof": "^2.0.4"
+  },
+  "keywords": [
+    "claude",
+    "anthropic",
+    "credentials",
+    "account",
+    "swap"
+  ],
+  "license": "MIT"
+}
