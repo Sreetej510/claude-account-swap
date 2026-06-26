@@ -146,7 +146,24 @@ function httpsGet(url, token) {
   });
 }
 
-const USAGE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const USAGE_CACHE_TTL = 5 * 60 * 1000;
+
+// Returns true only when `live` credentials belong to the same account as `stored`.
+// Compares organizationUuid — unique per Claude organization/personal account.
+// Prevents overwriting a saved account when credentials.json has been replaced
+// by a fresh login to a completely different account.
+function sameAccount(stored, live) {
+  if (!stored || !live) return false;
+  const a = stored.organizationUuid;
+  const b = live.organizationUuid;
+  // If either side has no uuid (unusual), fall back to comparing token prefix
+  if (!a || !b) {
+    const ta = stored.claudeAiOauth?.accessToken?.slice(0, 30);
+    const tb = live.claudeAiOauth?.accessToken?.slice(0, 30);
+    return ta && tb && ta === tb;
+  }
+  return a === b;
+} // 5 minutes
 
 // Returns a human-readable usage string, or null if unavailable.
 // Response shape: { five_hour: { utilization: 8.0, resets_at: "..." }, seven_day: { ... } }
@@ -271,10 +288,14 @@ async function cmdSwap() {
   // Re-read now — tokens may have refreshed while the picker was open
   const currentCreds = readJson(CREDENTIALS_FILE);
 
-  // Save current (refreshed) credentials back before switching
+  // Save current (refreshed) credentials back before switching.
+  // Guard: only overwrite if credentials.json still belongs to the same account
+  // (user may have logged out and back in as someone else since last swap).
   if (swapData.currentAccount) {
     const idx = swapData.accounts.findIndex(a => a.name === swapData.currentAccount);
-    if (idx >= 0) swapData.accounts[idx].credentials = currentCreds;
+    if (idx >= 0 && sameAccount(swapData.accounts[idx].credentials, currentCreds)) {
+      swapData.accounts[idx].credentials = currentCreds;
+    }
   }
 
   swapData.currentAccount = selected.name;
@@ -305,7 +326,9 @@ async function cmdAdd(name) {
     console.log(`${c.green}✓${c.reset} Added account ${c.bold}${name}${c.reset}`);
   }
 
-  if (!swapData.currentAccount) swapData.currentAccount = name;
+  // The credentials in credentials.json belong to this account right now,
+  // so it's always the current account after an add.
+  swapData.currentAccount = name;
 
   writeJson(SWAP_FILE, swapData);
   console.log(`${c.dim}Saved to ${SWAP_FILE}${c.reset}`);
@@ -320,11 +343,13 @@ async function cmdList() {
   }
 
   // Keep active account's stored token in sync with the live credentials.json
-  // (Claude Code refreshes tokens silently, so the stored copy goes stale fast)
+  // (Claude Code refreshes tokens silently, so the stored copy goes stale fast).
+  // Guard: only sync if credentials.json still belongs to the same account —
+  // if the user logged out and back in as someone else, don't clobber the stored creds.
   const liveCreds = readJson(CREDENTIALS_FILE);
   if (liveCreds && swapData.currentAccount) {
     const idx = swapData.accounts.findIndex(a => a.name === swapData.currentAccount);
-    if (idx >= 0) {
+    if (idx >= 0 && sameAccount(swapData.accounts[idx].credentials, liveCreds)) {
       swapData.accounts[idx].credentials = liveCreds;
       writeJson(SWAP_FILE, swapData);
     }
