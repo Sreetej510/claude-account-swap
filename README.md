@@ -15,13 +15,13 @@ npm install -g claude-account-swap
 Log in to your first account in Claude Code, then save it:
 
 ```sh
-claude-swap add "Personal"
+cas add "Personal"
 ```
 
 Log in to your second account, then save it:
 
 ```sh
-claude-swap add "Work"
+cas add "Work"
 ```
 
 Each account gets a unique MAC address automatically. The first account keeps your real MAC; additional accounts get randomly generated VM-vendor MACs so they appear as different devices.
@@ -29,7 +29,7 @@ Each account gets a unique MAC address automatically. The first account keeps yo
 ## Usage
 
 ```sh
-claude-swap
+cas
 ```
 
 Opens an interactive picker. Use arrow keys to select an account, Enter to switch. The tool:
@@ -44,11 +44,13 @@ Restart Claude Code after swapping.
 
 | Command | Description |
 |---|---|
-| `claude-swap` | Interactive account switcher |
-| `claude-swap add <name>` | Save current credentials + MAC as a named account |
-| `claude-swap list` | List all saved accounts with their MACs |
-| `claude-swap remove <name>` | Delete a saved account |
-| `claude-swap help` | Show help |
+| `cas` | Interactive account switcher |
+| `cas add <name>` | Save current credentials + MAC as a named account |
+| `cas list` | List all saved accounts with their MACs |
+| `cas remove <name>` | Delete a saved account |
+| `cas help` | Show help |
+
+All commands also work with `claude-account-swap` as the prefix.
 
 ## Files
 

@@ -108,8 +108,7 @@ function selectFromList(items, labelFn, currentName) {
 // ── commands ──────────────────────────────────────────────────────────────────
 
 async function cmdSwap() {
-  const currentCreds = readCurrentCredentials();
-  if (!currentCreds) {
+  if (!readCurrentCredentials()) {
     console.error(`${c.red}Error:${c.reset} No credentials found at ${CREDENTIALS_FILE}`);
     process.exit(1);
   }
@@ -118,7 +117,7 @@ async function cmdSwap() {
 
   if (swapData.accounts.length === 0) {
     console.log('No accounts saved yet.\n');
-    console.log(`Save the current credentials first:\n  ${c.bold}claude-swap add "My Account"${c.reset}`);
+    console.log(`Save the current credentials first:\n  ${c.bold}cas add "My Account"${c.reset}`);
     process.exit(0);
   }
 
@@ -126,7 +125,7 @@ async function cmdSwap() {
 
   if (available.length === 0) {
     console.log(`Only one account saved (${c.yellow}${swapData.currentAccount}${c.reset}) — nothing to swap to.`);
-    console.log(`Add another account:\n  ${c.bold}claude-swap add "Another Account"${c.reset}`);
+    console.log(`Add another account:\n  ${c.bold}cas add "Another Account"${c.reset}`);
     process.exit(0);
   }
 
@@ -143,6 +142,9 @@ async function cmdSwap() {
   );
 
   if (!selected) { console.log('Cancelled.'); return; }
+
+  // Re-read credentials.json now — tokens may have refreshed since the picker opened
+  const currentCreds = readCurrentCredentials();
 
   // Persist current credentials + current MAC back under its name
   if (swapData.currentAccount) {
@@ -240,7 +242,7 @@ function cmdList() {
   const swapData = readSwapData();
 
   if (swapData.accounts.length === 0) {
-    console.log(`No accounts saved.\n  ${c.bold}claude-swap add "Name"${c.reset} to save the current credentials.`);
+    console.log(`No accounts saved.\n  ${c.bold}cas add "Name"${c.reset} to save the current credentials.`);
     return;
   }
 
@@ -282,21 +284,21 @@ function cmdRemove(name) {
 
 function showHelp() {
   console.log(`
-${c.bold}claude-swap${c.reset} — Switch between Claude accounts (credentials + MAC address)
+${c.bold}claude-account-swap${c.reset} — Switch between Claude accounts (credentials + MAC address)
 
 ${c.bold}Usage:${c.reset}
-  claude-swap                     Interactive account switcher
-  claude-swap add <name>          Save current credentials + MAC as a named account
-  claude-swap list                List all saved accounts
-  claude-swap remove <name>       Remove a saved account
-  claude-swap help                Show this help
+  cas                             Interactive account switcher
+  cas add <name>                  Save current credentials + MAC as a named account
+  cas list                        List all saved accounts
+  cas remove <name>               Remove a saved account
+  cas help                        Show this help
 
 ${c.bold}Typical workflow:${c.reset}
   1. Log in to account A in Claude Code
-     ${c.dim}claude-swap add "Work"${c.reset}
+     ${c.dim}cas add "Work"${c.reset}
   2. Log in to account B in Claude Code
-     ${c.dim}claude-swap add "Personal"${c.reset}
-  3. Run ${c.bold}claude-swap${c.reset} any time — switches credentials AND spoofs MAC
+     ${c.dim}cas add "Personal"${c.reset}
+  3. Run ${c.bold}cas${c.reset} any time — switches credentials AND spoofs MAC
 
 ${c.bold}Notes:${c.reset}
   • MAC spoofing requires Administrator / root privileges
@@ -330,7 +332,7 @@ async function main() {
   }
 }
 
-main().catch(err => {
+main().then(() => process.exit(0)).catch(err => {
   console.error(`${c.red}Error:${c.reset}`, err.message);
   process.exit(1);
 });
