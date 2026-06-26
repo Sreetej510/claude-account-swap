@@ -1,7 +1,7 @@
 {
   "name": "claude-account-swap",
   "version": "1.0.1",
-  "description": "Switch between Claude accounts — swaps credentials and spoofs MAC address",
+  "description": "Switch between multiple Claude accounts from the terminal",
   "main": "index.js",
   "bin": {
     "claude-account-swap": "./index.js",
@@ -21,5 +21,9 @@
     "account",
     "swap"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sreetej510/claude-account-swap"
+  }
 }
