@@ -27,7 +27,9 @@ function writeJson(filePath, data) {
 }
 
 function readSwapData() {
-  return readJson(SWAP_FILE) || { currentAccount: null, accounts: [] };
+  const data = readJson(SWAP_FILE) || { accounts: [] };
+  delete data.currentAccount; // legacy field — identity is now UUID-based
+  return data;
 }
 
 const c = {
@@ -148,27 +150,96 @@ function httpsGet(url, token) {
 
 const USAGE_CACHE_TTL = 5 * 60 * 1000;
 
-// Returns true only when `live` credentials belong to the same account as `stored`.
-// Compares organizationUuid — unique per Claude organization/personal account.
-// Prevents overwriting a saved account when credentials.json has been replaced
-// by a fresh login to a completely different account.
-function sameAccount(stored, live) {
-  if (!stored || !live) return false;
-  const a = stored.organizationUuid;
-  const b = live.organizationUuid;
-  // If either side has no uuid (unusual), fall back to comparing token prefix
-  if (!a || !b) {
-    const ta = stored.claudeAiOauth?.accessToken?.slice(0, 30);
-    const tb = live.claudeAiOauth?.accessToken?.slice(0, 30);
-    return ta && tb && ta === tb;
+// Find which stored account matches a set of credentials by organizationUuid.
+// Returns the index, or -1 if not found.
+function findByUuid(accounts, creds) {
+  const uuid = creds?.organizationUuid;
+  if (!uuid) return -1;
+  return accounts.findIndex(a => a.credentials?.organizationUuid === uuid);
+}
+
+// True when the stored access token's expiry timestamp has passed.
+function isTokenExpired(credentials) {
+  const exp = credentials?.claudeAiOauth?.expiresAt;
+  return exp != null && Date.now() > exp;
+}
+
+// Exchange a refresh token for a new access+refresh token pair.
+// Returns updated credentials object, or null on failure.
+async function refreshCredentials(credentials) {
+  const refreshTok = credentials?.claudeAiOauth?.refreshToken;
+  if (!refreshTok) return null;
+
+  const payload = JSON.stringify({
+    grant_type: 'refresh_token',
+    refresh_token: refreshTok,
+    client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+  });
+
+  let respData = null;
+
+  if (process.platform === 'win32') {
+    const result = cp.spawnSync('curl', [
+      '-s', '--max-time', '10', '-X', 'POST',
+      '-H', 'Content-Type: application/json',
+      '-H', 'Accept: application/json',
+      '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      '-d', payload,
+      '-w', '\n%{http_code}',
+      'https://console.anthropic.com/v1/oauth/token',
+    ], { encoding: 'utf8', timeout: 15000 });
+
+    if (!result.error && result.status === 0) {
+      const out   = result.stdout.trim();
+      const lines = out.split('\n');
+      const status = parseInt(lines.at(-1), 10);
+      if (status === 200) {
+        try { respData = JSON.parse(lines.slice(0, -1).join('\n')); } catch {}
+      }
+    }
+  } else {
+    respData = await new Promise((resolve) => {
+      const req = https.request({
+        hostname: 'console.anthropic.com', path: '/v1/oauth/token', method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 12000,
+      }, (res) => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => {
+          if (res.statusCode === 200) { try { resolve(JSON.parse(body)); } catch { resolve(null); } }
+          else resolve(null);
+        });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.write(payload);
+      req.end();
+    });
   }
-  return a === b;
-} // 5 minutes
+
+  if (!respData?.access_token) return null;
+
+  const updated = JSON.parse(JSON.stringify(credentials)); // deep clone
+  updated.claudeAiOauth.accessToken  = respData.access_token;
+  if (respData.refresh_token) updated.claudeAiOauth.refreshToken = respData.refresh_token;
+  if (respData.expires_in != null)
+    updated.claudeAiOauth.expiresAt = Date.now() + respData.expires_in * 1000;
+  return updated;
+}
 
 // Returns a human-readable usage string, or null if unavailable.
 // Response shape: { five_hour: { utilization: 8.0, resets_at: "..." }, seven_day: { ... } }
 // utilization is 0–100 (percent used).
 async function fetchUsage(credentials, cached) {
+  // Safety net: if token still expired after refresh attempt, skip the API call
+  if (isTokenExpired(credentials)) return '(token expired)';
+
   // Use cached value if it's fresh enough
   if (cached?.text && cached?.at && (Date.now() - cached.at) < USAGE_CACHE_TTL) {
     return cached.text;
@@ -226,7 +297,7 @@ async function fetchUsage(credentials, cached) {
     }
 
     // Pro: utilization windows (percent used, 0–100)
-    function fmtWindow(obj, label) {
+    function fmtWindow(obj, label, showDay) {
       if (!obj || obj.utilization == null) return null;
       const used   = Math.round(obj.utilization);
       const filled = Math.round(used / 20);
@@ -234,14 +305,16 @@ async function fetchUsage(credentials, cached) {
       let resetStr = '';
       if (obj.resets_at) {
         const rd = new Date(obj.resets_at);
-        resetStr = `  ↺ ${rd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+        resetStr = showDay
+          ? `  ↺ ${rd.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${rd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+          : `  ↺ ${rd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
       }
       return `${label}:${bar}${used}% used${resetStr}`;
     }
 
     const parts = [
-      fmtWindow(d.five_hour, '5h'),
-      fmtWindow(d.seven_day, '7d'),
+      fmtWindow(d.five_hour, '5h', false),
+      fmtWindow(d.seven_day, '7d', true),
     ].filter(Boolean);
 
     return parts.length ? parts.join('  ') : null;
@@ -253,7 +326,8 @@ async function fetchUsage(credentials, cached) {
 // ── commands ──────────────────────────────────────────────────────────────────
 
 async function cmdSwap() {
-  if (!readJson(CREDENTIALS_FILE)) {
+  const liveCreds = readJson(CREDENTIALS_FILE);
+  if (!liveCreds) {
     console.error(`${c.red}Error:${c.reset} No credentials found at ${CREDENTIALS_FILE}`);
     process.exit(1);
   }
@@ -266,10 +340,13 @@ async function cmdSwap() {
     process.exit(0);
   }
 
-  const available = swapData.accounts.filter(a => a.name !== swapData.currentAccount);
+  const liveIdx   = findByUuid(swapData.accounts, liveCreds);
+  const currentName = liveIdx >= 0 ? swapData.accounts[liveIdx].name : null;
+  const available = swapData.accounts.filter((_, i) => i !== liveIdx);
 
   if (available.length === 0) {
-    console.log(`Only one account saved (${c.yellow}${swapData.currentAccount}${c.reset}) — nothing to swap to.`);
+    const who = currentName ? `${c.yellow}${currentName}${c.reset}` : 'current account';
+    console.log(`Only one account saved (${who}) — nothing to swap to.`);
     console.log(`Add another account:\n  ${c.bold}cas add "Another Account"${c.reset}`);
     process.exit(0);
   }
@@ -280,25 +357,20 @@ async function cmdSwap() {
       const sub = a.credentials?.claudeAiOauth?.subscriptionType;
       return sub ? `${a.name}  ${c.dim}${sub}${c.reset}` : a.name;
     },
-    swapData.currentAccount
+    currentName
   );
 
   if (!selected) { console.log('Cancelled.'); return; }
 
-  // Re-read now — tokens may have refreshed while the picker was open
-  const currentCreds = readJson(CREDENTIALS_FILE);
-
-  // Save current (refreshed) credentials back before switching.
-  // Guard: only overwrite if credentials.json still belongs to the same account
-  // (user may have logged out and back in as someone else since last swap).
-  if (swapData.currentAccount) {
-    const idx = swapData.accounts.findIndex(a => a.name === swapData.currentAccount);
-    if (idx >= 0 && sameAccount(swapData.accounts[idx].credentials, currentCreds)) {
-      swapData.accounts[idx].credentials = currentCreds;
-    }
+  // Re-read credentials.json — tokens may have refreshed while the picker was open.
+  // Find the matching account by UUID and save its latest credentials before leaving.
+  const freshCreds = readJson(CREDENTIALS_FILE);
+  const freshIdx   = findByUuid(swapData.accounts, freshCreds);
+  if (freshIdx >= 0) {
+    swapData.accounts[freshIdx].credentials = freshCreds;
+    console.log(`${c.dim}Saved latest credentials for ${swapData.accounts[freshIdx].name}.${c.reset}`);
   }
 
-  swapData.currentAccount = selected.name;
   writeJson(SWAP_FILE, swapData);
   writeJson(CREDENTIALS_FILE, selected.credentials);
 
@@ -316,19 +388,33 @@ async function cmdAdd(name) {
   }
 
   const swapData = readSwapData();
-  const existingIdx = swapData.accounts.findIndex(a => a.name === name);
 
-  if (existingIdx >= 0) {
-    swapData.accounts[existingIdx].credentials = currentCreds;
+  // UUID takes priority — catches the same account saved under a different name
+  const uuidIdx = findByUuid(swapData.accounts, currentCreds);
+  if (uuidIdx >= 0) {
+    const existing = swapData.accounts[uuidIdx];
+    existing.credentials = currentCreds;
+    existing.usageCache  = null;
+    if (existing.name !== name) {
+      console.log(`${c.yellow}Account already exists${c.reset} as ${c.bold}${existing.name}${c.reset} — credentials updated.`);
+    } else {
+      console.log(`${c.yellow}Account already exists${c.reset} — credentials updated for ${c.bold}${name}${c.reset}.`);
+    }
+    writeJson(SWAP_FILE, swapData);
+    console.log(`${c.dim}Saved to ${SWAP_FILE}${c.reset}`);
+    return;
+  }
+
+  // No UUID match — fall back to name match (same name slot, different account)
+  const nameIdx = swapData.accounts.findIndex(a => a.name === name);
+  if (nameIdx >= 0) {
+    swapData.accounts[nameIdx].credentials = currentCreds;
+    swapData.accounts[nameIdx].usageCache  = null;
     console.log(`${c.green}✓${c.reset} Updated account ${c.bold}${name}${c.reset}`);
   } else {
     swapData.accounts.push({ name, credentials: currentCreds });
     console.log(`${c.green}✓${c.reset} Added account ${c.bold}${name}${c.reset}`);
   }
-
-  // The credentials in credentials.json belong to this account right now,
-  // so it's always the current account after an add.
-  swapData.currentAccount = name;
 
   writeJson(SWAP_FILE, swapData);
   console.log(`${c.dim}Saved to ${SWAP_FILE}${c.reset}`);
@@ -342,18 +428,29 @@ async function cmdList() {
     return;
   }
 
-  // Keep active account's stored token in sync with the live credentials.json
-  // (Claude Code refreshes tokens silently, so the stored copy goes stale fast).
-  // Guard: only sync if credentials.json still belongs to the same account —
-  // if the user logged out and back in as someone else, don't clobber the stored creds.
+  // Sync credentials.json → swap-accounts.json using UUID as the identity key.
+  // Claude Code silently rotates tokens; this keeps the stored copy current.
   const liveCreds = readJson(CREDENTIALS_FILE);
-  if (liveCreds && swapData.currentAccount) {
-    const idx = swapData.accounts.findIndex(a => a.name === swapData.currentAccount);
-    if (idx >= 0 && sameAccount(swapData.accounts[idx].credentials, liveCreds)) {
-      swapData.accounts[idx].credentials = liveCreds;
-      writeJson(SWAP_FILE, swapData);
-    }
+  const liveIdx   = findByUuid(swapData.accounts, liveCreds);
+  if (liveIdx >= 0) {
+    swapData.accounts[liveIdx].credentials = liveCreds;
+    writeJson(SWAP_FILE, swapData);
   }
+
+  // Refresh expired access tokens for all accounts using their stored refresh tokens.
+  // The active account's token is handled by the UUID sync above; this covers
+  // inactive accounts whose access tokens expired while they were sitting idle.
+  let tokensDirty = false;
+  await Promise.all(swapData.accounts.map(async (a, i) => {
+    if (isTokenExpired(a.credentials)) {
+      const refreshed = await refreshCredentials(a.credentials);
+      if (refreshed) {
+        swapData.accounts[i].credentials = refreshed;
+        tokensDirty = true;
+      }
+    }
+  }));
+  if (tokensDirty) writeJson(SWAP_FILE, swapData);
 
   console.log(`${c.bold}Saved accounts:${c.reset}\n`);
   process.stdout.write(`${c.dim}Fetching usage…${c.reset}\r`);
@@ -378,7 +475,7 @@ async function cmdList() {
   process.stdout.write('\r\x1b[K'); // clear "Fetching…" line
 
   swapData.accounts.forEach((a, i) => {
-    const active  = a.name === swapData.currentAccount;
+    const active  = i === liveIdx;
     const sub     = a.credentials?.claudeAiOauth?.subscriptionType || 'unknown';
     const usage   = usages[i];
     const marker  = active ? `${c.green}●${c.reset}` : ' ';
@@ -396,7 +493,9 @@ function cmdRemove(name) {
   const idx = swapData.accounts.findIndex(a => a.name === name);
 
   if (idx < 0) { console.error(`${c.red}Error:${c.reset} Account not found: ${name}`); process.exit(1); }
-  if (swapData.currentAccount === name) {
+
+  const liveCreds = readJson(CREDENTIALS_FILE);
+  if (findByUuid(swapData.accounts, liveCreds) === idx) {
     console.error(`${c.red}Error:${c.reset} Cannot remove the active account. Switch to another first.`);
     process.exit(1);
   }
