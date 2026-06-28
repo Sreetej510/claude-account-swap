@@ -1,6 +1,6 @@
 {
   "name": "claude-account-swap",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Switch between multiple Claude accounts from the terminal",
   "main": "index.js",
   "bin": {
